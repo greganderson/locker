@@ -1,0 +1,9 @@
+# Copy to ~/.lockerrc and edit. Both keys are optional.
+
+# The unlock code. Type it (anywhere, no input box appears) to dismiss the
+# lock screen. Default if unset: unlock
+code = letmein
+
+# Fullscreen background image (png/jpg/webp/bmp/gif/tiff). If unset or the
+# file can't be loaded, a built-in lock screen (clock + padlock) is shown.
+#image = ~/Pictures/fake-lock.png
