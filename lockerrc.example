@@ -1,4 +1,4 @@
-# Copy to ~/.lockerrc and edit. Both keys are optional.
+# Copy to ~/.lockerrc and edit. All keys are optional.
 
 # The unlock code. Type it (anywhere, no input box appears) to dismiss the
 # lock screen. Default if unset: unlock
@@ -7,3 +7,10 @@ code = letmein
 # Fullscreen background image (png/jpg/webp/bmp/gif/tiff). If unset or the
 # file can't be loaded, a built-in lock screen (clock + padlock) is shown.
 #image = ~/Pictures/fake-lock.png
+
+# Screen aliases. Output names come from `locker --list`. With aliases set
+# you can lock a subset of screens: `locker --laptop --monitor`, `locker -lm`,
+# or `locker laptop monitor`. With no arguments every screen is locked.
+#screen.laptop = eDP-1
+#screen.monitor = DP-1
+#screen.tv = HDMI-A-1

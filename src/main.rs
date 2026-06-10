@@ -19,6 +19,7 @@ use winit::application::ApplicationHandler;
 use winit::event::{ElementState, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState};
+use winit::monitor::MonitorHandle;
 use winit::window::{Fullscreen, Window, WindowId};
 
 const DEFAULT_CODE: &str = "unlock";
@@ -26,6 +27,8 @@ const DEFAULT_CODE: &str = "unlock";
 struct Config {
     code: String,
     image: Option<PathBuf>,
+    /// Screen aliases from `screen.<alias> = <output>` lines, in file order.
+    screens: Vec<(String, String)>,
 }
 
 fn expand_tilde(path: &str) -> PathBuf {
@@ -41,6 +44,7 @@ fn load_config() -> Config {
     let mut config = Config {
         code: DEFAULT_CODE.to_string(),
         image: None,
+        screens: Vec::new(),
     };
     let Some(home) = std::env::var_os("HOME") else {
         return config;
@@ -63,10 +67,111 @@ fn load_config() -> Config {
         match key.trim().to_ascii_lowercase().as_str() {
             "code" => config.code = value.to_string(),
             "image" => config.image = Some(expand_tilde(value)),
-            _ => {}
+            k => {
+                if let Some(alias) = k.strip_prefix("screen.") {
+                    if !alias.is_empty() {
+                        config.screens.push((alias.to_string(), value.to_string()));
+                    }
+                }
+            }
         }
     }
     config
+}
+
+enum Mode {
+    /// Lock the listed output names, or every monitor if None.
+    Lock(Option<Vec<String>>),
+    /// Print connected monitors and exit.
+    List,
+}
+
+fn print_usage(config: &Config) {
+    println!("usage: locker [--list] [screen ...]");
+    println!();
+    println!("With no screens given, every connected monitor is locked.");
+    println!();
+    if config.screens.is_empty() {
+        println!("No screen aliases configured. Add lines to ~/.lockerrc like:");
+        println!("  screen.laptop = eDP-1");
+        println!("  screen.tv = HDMI-A-1");
+        println!("then select screens with --laptop, -l, or bare: locker laptop");
+    } else {
+        println!("screens (from ~/.lockerrc):");
+        for (alias, output) in &config.screens {
+            let short = alias.chars().next().unwrap_or('?');
+            println!("  --{alias}  (-{short})  ->  {output}");
+        }
+        println!("shorts combine: -lm. Raw output names also work: locker DP-1");
+    }
+    println!();
+    println!("options:");
+    println!("  --list      show connected monitor names and exit");
+    println!("  --all       lock all monitors (same as no screens)");
+    println!("  -h, --help  show this help");
+}
+
+fn usage_error(config: &Config, msg: &str) -> ! {
+    eprintln!("locker: {msg}");
+    eprintln!();
+    print_usage(config);
+    std::process::exit(2);
+}
+
+/// Resolve a screen selector: a configured alias maps to its output name,
+/// anything else is taken as a raw output name (verified at window creation).
+fn resolve_screen(config: &Config, name: &str) -> String {
+    config
+        .screens
+        .iter()
+        .find(|(alias, _)| alias.eq_ignore_ascii_case(name))
+        .map(|(_, output)| output.clone())
+        .unwrap_or_else(|| name.to_string())
+}
+
+fn parse_args(config: &Config) -> Mode {
+    let mut selected: Vec<String> = Vec::new();
+    let mut all = false;
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                print_usage(config);
+                std::process::exit(0);
+            }
+            "--list" => return Mode::List,
+            "--all" => all = true,
+            s if s.starts_with("--") => selected.push(resolve_screen(config, &s[2..])),
+            s if s.starts_with('-') && s.len() > 1 => {
+                // Combined short flags: each letter is the first letter of a
+                // configured alias.
+                for ch in s[1..].chars() {
+                    let matches: Vec<_> = config
+                        .screens
+                        .iter()
+                        .filter(|(alias, _)| {
+                            alias.chars().next().is_some_and(|c| c.eq_ignore_ascii_case(&ch))
+                        })
+                        .collect();
+                    match matches.as_slice() {
+                        [(_, output)] => selected.push(output.clone()),
+                        [] => usage_error(config, &format!("no screen alias starts with '{ch}'")),
+                        _ => usage_error(
+                            config,
+                            &format!("'-{ch}' is ambiguous; use the full --alias form"),
+                        ),
+                    }
+                }
+            }
+            s => selected.push(resolve_screen(config, s)),
+        }
+    }
+    selected.sort();
+    selected.dedup();
+    if all || selected.is_empty() {
+        Mode::Lock(None)
+    } else {
+        Mode::Lock(Some(selected))
+    }
 }
 
 /// Find a usable system font for the built-in lock screen. Best effort: if
@@ -125,12 +230,56 @@ struct App {
     /// Windows have been destroyed; stop the process on the next timer tick,
     /// after the event loop has flushed the destroy requests to the compositor.
     pending_suspend: bool,
+    /// Output names to lock; None locks every monitor.
+    selected: Option<Vec<String>>,
+    /// Print monitors and exit instead of locking.
+    list_only: bool,
+    /// Alias table, for annotating --list output.
+    screens: Vec<(String, String)>,
+    /// Set when locking failed (e.g. no matching monitors).
+    failed: bool,
 }
 
 impl App {
+    fn list_monitors(&self, event_loop: &ActiveEventLoop) {
+        let monitors: Vec<_> = event_loop.available_monitors().collect();
+        if monitors.is_empty() {
+            println!("no monitors detected");
+        }
+        for monitor in monitors {
+            let name = monitor.name().unwrap_or_else(|| "<unnamed>".to_string());
+            let size = monitor.size();
+            let alias = self
+                .screens
+                .iter()
+                .find(|(_, output)| output.eq_ignore_ascii_case(&name))
+                .map(|(alias, _)| format!("  (alias: {alias})"))
+                .unwrap_or_default();
+            println!("{name}  {}x{}{alias}", size.width, size.height);
+        }
+    }
+
     fn create_windows(&mut self, event_loop: &ActiveEventLoop) {
-        let monitors: Vec<_> = event_loop.available_monitors().map(Some).collect();
-        let targets = if monitors.is_empty() { vec![None] } else { monitors };
+        let monitors: Vec<_> = event_loop.available_monitors().collect();
+        let targets: Vec<Option<MonitorHandle>> = match &self.selected {
+            Some(wanted) => monitors
+                .into_iter()
+                .filter(|m| {
+                    m.name()
+                        .is_some_and(|n| wanted.iter().any(|w| n.eq_ignore_ascii_case(w)))
+                })
+                .map(Some)
+                .collect(),
+            None if monitors.is_empty() => vec![None],
+            None => monitors.into_iter().map(Some).collect(),
+        };
+        if targets.is_empty() {
+            eprintln!("locker: no connected monitor matches the requested screens; available:");
+            self.list_monitors(event_loop);
+            self.failed = true;
+            event_loop.exit();
+            return;
+        }
         for monitor in targets {
             let attrs = Window::default_attributes()
                 .with_title("locker")
@@ -222,6 +371,11 @@ impl App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.list_only {
+            self.list_monitors(event_loop);
+            event_loop.exit();
+            return;
+        }
         if self.windows.is_empty() && !self.pending_suspend {
             self.create_windows(event_loop);
         }
@@ -441,26 +595,42 @@ fn render_default(buf: &mut [u32], w: u32, h: u32, font: Option<&fontdue::Font>)
 
 fn main() {
     let config = load_config();
-    let image = config.image.as_ref().and_then(|path| match image::open(path) {
-        Ok(img) => Some(img.to_rgb8()),
-        Err(err) => {
-            eprintln!(
-                "locker: cannot load image {}: {err}; using built-in lock screen",
-                path.display()
-            );
-            None
-        }
-    });
+    let mode = parse_args(&config);
+    let (list_only, selected) = match mode {
+        Mode::List => (true, None),
+        Mode::Lock(selected) => (false, selected),
+    };
+    let image = if list_only {
+        None
+    } else {
+        config.image.as_ref().and_then(|path| match image::open(path) {
+            Ok(img) => Some(img.to_rgb8()),
+            Err(err) => {
+                eprintln!(
+                    "locker: cannot load image {}: {err}; using built-in lock screen",
+                    path.display()
+                );
+                None
+            }
+        })
+    };
     let mut app = App {
         code: config.code,
         image,
-        font: load_font(),
+        font: if list_only { None } else { load_font() },
         windows: Vec::new(),
         typed: String::new(),
         modifiers: ModifiersState::empty(),
         pending_suspend: false,
+        selected,
+        list_only,
+        screens: config.screens,
+        failed: false,
     };
     let event_loop = EventLoop::new().expect("locker: failed to create event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
     event_loop.run_app(&mut app).expect("locker: event loop error");
+    if app.failed {
+        std::process::exit(1);
+    }
 }

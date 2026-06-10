@@ -18,7 +18,11 @@ install -Dm755 target/release/locker ~/.local/bin/locker
 ## Usage
 
 ```sh
-locker
+locker              # lock every monitor
+locker --list       # show connected output names (and their aliases)
+locker -lm          # lock only the screens aliased laptop + monitor
+locker --tv         # lock only the tv
+locker DP-1         # raw output names work too
 ```
 
 - **Unlock:** type the code (default `unlock`). Mistyped characters don't
@@ -39,7 +43,18 @@ code = letmein
 # fullscreen background image; scaled to fill, center-cropped.
 # if unset or unloadable, the built-in lock screen is used.
 image = ~/Pictures/fake-lock.png
+
+# screen aliases (output names from `locker --list`)
+screen.laptop = eDP-1
+screen.monitor = DP-1
+screen.tv = HDMI-A-1
 ```
+
+With aliases configured, screens can be selected as `--laptop`, bare
+`laptop`, or combined first-letter shorts (`-lm` = laptop + monitor). No
+selection means all screens. When only some screens are locked, click or
+move the mouse onto a locked screen first so it has keyboard focus, then
+type the code.
 
 See `lockerrc.example`. A handy trick: screenshot your real lock screen once
 and point `image` at it.
